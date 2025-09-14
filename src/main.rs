@@ -8,6 +8,7 @@ use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::cmp::Ordering;
 
 #[derive(Parser, Debug)]
 #[command(name = "xcloud", version, about = "Xcode Cloud CLI in Rust", long_about = None)]
@@ -378,7 +379,7 @@ impl AppStoreConnectClient {
 
     async fn cancel_build_run(&self, run_id: &str) -> Result<()> {
         // Apple actions often use the actions namespace
-        let path = format!("v1/ciBuildRuns/{}/actions/cancel", run_id);
+        let path = format!("v1/ciBuildRuns/{}/cancel", run_id);
         let _ = self.post(&path, json!({})).await?;
         Ok(())
     }
@@ -419,6 +420,28 @@ fn resource_id(resource: &Value) -> String {
         .and_then(|i| i.as_str())
         .unwrap_or("")
         .to_string()
+}
+
+fn pretty_run_status(run: &Value) -> String {
+    let a = run.get("attributes");
+    let status = a
+        .and_then(|a| a.get("buildResult")).and_then(|s| s.as_str())
+        .or_else(|| a.and_then(|a| a.get("executionProgress")).and_then(|s| s.as_str()))
+        .or_else(|| a.and_then(|a| a.get("completionStatus")).and_then(|s| s.as_str()))
+        .or_else(|| a.and_then(|a| a.get("status")).and_then(|s| s.as_str()))
+        .unwrap_or("UNKNOWN");
+    status.to_string()
+}
+
+fn compare_runs_desc(a: &Value, b: &Value) -> Ordering {
+    let ca = a.get("attributes").and_then(|x| x.get("createdDate")).and_then(|s| s.as_str());
+    let cb = b.get("attributes").and_then(|x| x.get("createdDate")).and_then(|s| s.as_str());
+    match (ca, cb) {
+        (Some(a), Some(b)) => b.cmp(a), // newer first
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        _ => resource_id(b).cmp(&resource_id(a)),
+    }
 }
 
 fn spinner(msg: &str) -> ProgressBar {
@@ -558,15 +581,14 @@ async fn workflow_info_cmd(client: &AppStoreConnectClient, workflow_id: &str) ->
 
 async fn list_runs_cmd(client: &AppStoreConnectClient, workflow_id: &str) -> Result<()> {
     let pb = spinner("Loading runs...");
-    let runs = client.list_build_runs_for_workflow(workflow_id).await?;
+    let mut runs = client.list_build_runs_for_workflow(workflow_id).await?;
     pb.finish_and_clear();
     if runs.is_empty() { println!("No runs found"); return Ok(()); }
+    // Sort by createdDate desc if present, else by id desc
+    runs.sort_by(|a, b| compare_runs_desc(a, b));
     for r in runs {
         let rid = resource_id(&r);
-        let status = r
-            .get("attributes").and_then(|a| a.get("buildResult")).and_then(|s| s.as_str())
-            .or_else(|| r.get("attributes").and_then(|a| a.get("status")).and_then(|s| s.as_str()))
-            .unwrap_or("<unknown>");
+        let status = pretty_run_status(&r);
         println!("{}\t{}", rid, status);
     }
     Ok(())
@@ -801,21 +823,20 @@ async fn browse_flow(client: &AppStoreConnectClient) -> Result<()> {
 
 async fn runs_submenu(client: &AppStoreConnectClient, theme: &ColorfulTheme, workflow_id: &str) -> Result<()> {
     loop {
-        let runs = {
+        let mut runs = {
             let pb = spinner("Loading runs...");
             let r = client.list_build_runs_for_workflow(workflow_id).await;
             pb.finish_and_clear();
             r
         }?;
         if runs.is_empty() { println!("No runs found"); return Ok(()); }
+        runs.sort_by(|a, b| compare_runs_desc(a, b));
 
         let mut items: Vec<String> = runs.iter().map(|r| {
             let rid = resource_id(r);
-            let status = r
-                .get("attributes").and_then(|a| a.get("buildResult")).and_then(|s| s.as_str())
-                .or_else(|| r.get("attributes").and_then(|a| a.get("status")).and_then(|s| s.as_str()))
-                .unwrap_or("<unknown>");
-            format!("{} - {}", rid, status)
+            let status = pretty_run_status(r);
+            let when = r.get("attributes").and_then(|a| a.get("createdDate")).and_then(|s| s.as_str()).unwrap_or("");
+            if when.is_empty() { format!("{} - {}", rid, status) } else { format!("{} - {} - {}", rid, status, when) }
         }).collect();
         items.push("Back".into());
         items.push("Exit".into());
