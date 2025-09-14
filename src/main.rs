@@ -74,20 +74,14 @@ enum Commands {
         #[arg(short = 'r', long = "run")]
         run_id: String,
     },
-    /// Cancel a build run (best-effort)
-    RunCancel {
-        /// CI Build Run ID
-        #[arg(short = 'r', long = "run")]
-        run_id: String,
-    },
     /// List artifacts for a build run
     Artifacts {
         /// CI Build Run ID
         #[arg(short = 'r', long = "run")]
         run_id: String,
     },
-    /// List logs for a build run
-    Logs {
+    /// List test results for a build run
+    TestResults {
         /// CI Build Run ID
         #[arg(short = 'r', long = "run")]
         run_id: String,
@@ -377,21 +371,35 @@ impl AppStoreConnectClient {
         self.get(&path).await
     }
 
-    async fn cancel_build_run(&self, run_id: &str) -> Result<()> {
-        // Apple actions often use the actions namespace
-        let path = format!("v1/ciBuildRuns/{}/cancel", run_id);
-        let _ = self.post(&path, json!({})).await?;
-        Ok(())
+    async fn list_actions_for_run(&self, run_id: &str) -> Result<Vec<Value>> {
+        // Build run -> actions
+        self.list_all(&format!("v1/ciBuildRuns/{}/actions?limit=200", run_id)).await
     }
 
-    async fn list_artifacts_for_run(&self, run_id: &str) -> Result<Vec<Value>> {
-        let path = format!("v1/ciBuildRuns/{}/artifacts?limit=200", run_id);
-        self.list_all(&path).await
+    async fn list_artifacts_for_action(&self, action_id: &str) -> Result<Vec<Value>> {
+        // Per docs: GET /v1/ciBuildActions/{id}/artifacts
+        self.list_all(&format!("v1/ciBuildActions/{}/artifacts?limit=200", action_id)).await
     }
 
-    async fn list_logs_for_run(&self, run_id: &str) -> Result<Vec<Value>> {
-        let path = format!("v1/ciBuildRuns/{}/logs?limit=200", run_id);
-        self.list_all(&path).await
+    async fn get_artifact(&self, artifact_id: &str) -> Result<Value> {
+        // Per docs: GET /v1/ciArtifacts/{id}
+        self.get(&format!("v1/ciArtifacts/{}", artifact_id)).await
+    }
+
+    async fn list_test_results_for_run(&self, run_id: &str) -> Result<Vec<Value>> {
+        // Build run -> actions -> testResults relationship on actions
+        // First try the documented endpoint on actions via include
+        // Fallback approach: request actions and for each action, follow its testResults link
+        let actions = self.list_actions_for_run(run_id).await?;
+        let mut results: Vec<Value> = Vec::new();
+        for act in actions {
+            let aid = resource_id(&act);
+            // GET /v1/ciBuildActions/{id}/testResults
+            if let Ok(list) = self.list_all(&format!("v1/ciBuildActions/{}/testResults?limit=200", aid)).await {
+                results.extend(list);
+            }
+        }
+        Ok(results)
     }
 }
 
@@ -469,9 +477,8 @@ async fn main() -> Result<()> {
         Commands::WorkflowInfo { workflow } => workflow_info_cmd(&client, &workflow).await?,
         Commands::Runs { workflow } => list_runs_cmd(&client, &workflow).await?,
         Commands::RunInfo { run_id } => run_info_cmd(&client, &run_id).await?,
-        Commands::RunCancel { run_id } => run_cancel_cmd(&client, &run_id).await?,
         Commands::Artifacts { run_id } => run_artifacts_cmd(&client, &run_id).await?,
-        Commands::Logs { run_id } => run_logs_cmd(&client, &run_id).await?,
+        Commands::TestResults { run_id } => run_test_results_cmd(&client, &run_id).await?,
     }
 
     Ok(())
@@ -602,16 +609,7 @@ async fn run_info_cmd(client: &AppStoreConnectClient, run_id: &str) -> Result<()
     Ok(())
 }
 
-async fn run_cancel_cmd(client: &AppStoreConnectClient, run_id: &str) -> Result<()> {
-    let pb = spinner("Cancelling run...");
-    let res = client.cancel_build_run(run_id).await;
-    pb.finish_and_clear();
-    match res {
-        Ok(_) => println!("Run {} cancellation requested", run_id),
-        Err(e) => eprintln!("Failed to cancel run: {}", e),
-    }
-    Ok(())
-}
+// removed cancel run action per API constraints
 
 fn extract_url_fields(v: &Value) -> Vec<(String, String)> {
     let mut out = Vec::new();
@@ -639,41 +637,64 @@ fn extract_url_fields(v: &Value) -> Vec<(String, String)> {
 }
 
 async fn run_artifacts_cmd(client: &AppStoreConnectClient, run_id: &str) -> Result<()> {
-    let pb = spinner("Loading artifacts...");
-    let arts = client.list_artifacts_for_run(run_id).await;
+    let pb = spinner("Loading actions...");
+    let acts = client.list_actions_for_run(run_id).await;
     pb.finish_and_clear();
-    match arts {
-        Ok(list) => {
-            if list.is_empty() { println!("No artifacts found"); return Ok(()); }
-            for a in list {
-                let id = resource_id(&a);
-                let name = resource_name(&a);
-                println!("{}\t{}", id, name);
-                let urls = extract_url_fields(&a);
-                for (k, u) in urls { println!("  {}: {}", k, u); }
+    match acts {
+        Ok(actions) => {
+            if actions.is_empty() { println!("No actions found"); return Ok(()); }
+            for act in actions {
+                let aid = resource_id(&act);
+                let aname = resource_name(&act);
+                println!("Action {}\t{}", aid, aname);
+                let pb = spinner("  Loading artifacts...");
+                let arts = client.list_artifacts_for_action(&aid).await;
+                pb.finish_and_clear();
+                match arts {
+                    Ok(list) => {
+                        if list.is_empty() { println!("  (no artifacts)"); }
+                        for a in list {
+                            let id = resource_id(&a);
+                            let name = resource_name(&a);
+                            println!("  {}\t{}", id, name);
+                            // Fetch artifact details to get any URL or metadata
+                            if let Ok(details) = client.get_artifact(&id).await {
+                                if let Some(attrs) = details.get("data").and_then(|d| d.get("attributes")) {
+                                    if let Some(size) = attrs.get("fileSize").and_then(|x| x.as_i64()) {
+                                        println!("    size: {} bytes", size);
+                                    }
+                                    if let Some(state) = attrs.get("state").and_then(|x| x.as_str()) {
+                                        println!("    state: {}", state);
+                                    }
+                                }
+                                let urls = extract_url_fields(&details);
+                                for (k, u) in urls { println!("    {}: {}", k, u); }
+                            }
+                        }
+                    }
+                    Err(e) => eprintln!("  Failed to list artifacts: {}", e),
+                }
             }
         }
-        Err(e) => eprintln!("Failed to list artifacts: {}", e),
+        Err(e) => eprintln!("Failed to load actions: {}", e),
     }
     Ok(())
 }
 
-async fn run_logs_cmd(client: &AppStoreConnectClient, run_id: &str) -> Result<()> {
-    let pb = spinner("Loading logs...");
-    let logs = client.list_logs_for_run(run_id).await;
+async fn run_test_results_cmd(client: &AppStoreConnectClient, run_id: &str) -> Result<()> {
+    let pb = spinner("Loading test results...");
+    let trs = client.list_test_results_for_run(run_id).await;
     pb.finish_and_clear();
-    match logs {
+    match trs {
         Ok(list) => {
-            if list.is_empty() { println!("No logs found"); return Ok(()); }
-            for l in list {
-                let id = resource_id(&l);
-                let name = resource_name(&l);
+            if list.is_empty() { println!("No test results found"); return Ok(()); }
+            for t in list {
+                let id = resource_id(&t);
+                let name = resource_name(&t);
                 println!("{}\t{}", id, name);
-                let urls = extract_url_fields(&l);
-                for (k, u) in urls { println!("  {}: {}", k, u); }
             }
         }
-        Err(e) => eprintln!("Failed to list logs: {}", e),
+        Err(e) => eprintln!("Failed to list test results: {}", e),
     }
     Ok(())
 }
@@ -853,10 +874,8 @@ async fn runs_submenu(client: &AppStoreConnectClient, theme: &ColorfulTheme, wor
         // Actions for run
         let actions = vec![
             "View details",
-            "Cancel run",
             "List artifacts",
-            "List logs",
-            "Open first artifact URL",
+            "Test results",
             "Back",
             "Exit",
         ];
@@ -867,28 +886,9 @@ async fn runs_submenu(client: &AppStoreConnectClient, theme: &ColorfulTheme, wor
             .interact()?;
         match aidx {
             0 => { run_info_cmd(client, &run_id).await?; }
-            1 => { run_cancel_cmd(client, &run_id).await?; }
-            2 => { run_artifacts_cmd(client, &run_id).await?; }
-            3 => { run_logs_cmd(client, &run_id).await?; }
-            4 => {
-                // Best-effort: try to open a URL from artifacts
-                let arts = client.list_artifacts_for_run(&run_id).await;
-                match arts {
-                    Ok(list) => {
-                        if let Some(first) = list.first() {
-                            if let Some((_, url)) = extract_url_fields(first).into_iter().find(|(k, _)| k.contains("url")) {
-                                let _ = open::that(url);
-                            } else {
-                                println!("No URL available on first artifact");
-                            }
-                        } else {
-                            println!("No artifacts found");
-                        }
-                    }
-                    Err(e) => eprintln!("Failed to load artifacts: {}", e),
-                }
-            }
-            5 => continue, // back to runs list
+            1 => { run_artifacts_cmd(client, &run_id).await?; }
+            2 => { run_test_results_cmd(client, &run_id).await?; }
+            3 => continue, // back
             _ => return Ok(()),
         }
     }
