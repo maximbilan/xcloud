@@ -47,6 +47,36 @@ enum Commands {
         #[arg(short, long)]
         branch: String,
     },
+    /// List recent build runs for a workflow
+    Runs {
+        /// CI Workflow ID
+        #[arg(short, long)]
+        workflow: String,
+    },
+    /// Show details for a build run
+    RunInfo {
+        /// CI Build Run ID
+        #[arg(short = 'r', long = "run")]
+        run_id: String,
+    },
+    /// Cancel a build run (best-effort)
+    RunCancel {
+        /// CI Build Run ID
+        #[arg(short = 'r', long = "run")]
+        run_id: String,
+    },
+    /// List artifacts for a build run
+    Artifacts {
+        /// CI Build Run ID
+        #[arg(short = 'r', long = "run")]
+        run_id: String,
+    },
+    /// List logs for a build run
+    Logs {
+        /// CI Build Run ID
+        #[arg(short = 'r', long = "run")]
+        run_id: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -234,6 +264,28 @@ impl AppStoreConnectClient {
         });
         self.post("v1/ciBuildRuns", body).await
     }
+
+    async fn get_build_run(&self, run_id: &str) -> Result<Value> {
+        let path = format!("v1/ciBuildRuns/{}", run_id);
+        self.get(&path).await
+    }
+
+    async fn cancel_build_run(&self, run_id: &str) -> Result<()> {
+        // Apple actions often use the actions namespace
+        let path = format!("v1/ciBuildRuns/{}/actions/cancel", run_id);
+        let _ = self.post(&path, json!({})).await?;
+        Ok(())
+    }
+
+    async fn list_artifacts_for_run(&self, run_id: &str) -> Result<Vec<Value>> {
+        let path = format!("v1/ciBuildRuns/{}/artifacts?limit=200", run_id);
+        self.list_all(&path).await
+    }
+
+    async fn list_logs_for_run(&self, run_id: &str) -> Result<Vec<Value>> {
+        let path = format!("v1/ciBuildRuns/{}/logs?limit=200", run_id);
+        self.list_all(&path).await
+    }
 }
 
 fn resource_name(resource: &Value) -> String {
@@ -273,6 +325,11 @@ async fn main() -> Result<()> {
         Commands::Workflows { product } => list_workflows_cmd(&client, &product).await?,
         Commands::Branches { product } => list_branches_cmd(&client, &product).await?,
         Commands::BuildStart { workflow, branch } => start_build_cmd(&client, &workflow, &branch).await?,
+        Commands::Runs { workflow } => list_runs_cmd(&client, &workflow).await?,
+        Commands::RunInfo { run_id } => run_info_cmd(&client, &run_id).await?,
+        Commands::RunCancel { run_id } => run_cancel_cmd(&client, &run_id).await?,
+        Commands::Artifacts { run_id } => run_artifacts_cmd(&client, &run_id).await?,
+        Commands::Logs { run_id } => run_logs_cmd(&client, &run_id).await?,
     }
 
     Ok(())
@@ -338,119 +395,320 @@ async fn start_build_cmd(client: &AppStoreConnectClient, workflow_id: &str, bran
     Ok(())
 }
 
+async fn list_runs_cmd(client: &AppStoreConnectClient, workflow_id: &str) -> Result<()> {
+    let pb = spinner("Loading runs...");
+    let runs = client.list_build_runs_for_workflow(workflow_id).await?;
+    pb.finish_and_clear();
+    if runs.is_empty() { println!("No runs found"); return Ok(()); }
+    for r in runs {
+        let rid = resource_id(&r);
+        let status = r
+            .get("attributes").and_then(|a| a.get("buildResult")).and_then(|s| s.as_str())
+            .or_else(|| r.get("attributes").and_then(|a| a.get("status")).and_then(|s| s.as_str()))
+            .unwrap_or("<unknown>");
+        println!("{}\t{}", rid, status);
+    }
+    Ok(())
+}
+
+async fn run_info_cmd(client: &AppStoreConnectClient, run_id: &str) -> Result<()> {
+    let pb = spinner("Loading run info...");
+    let v = client.get_build_run(run_id).await?;
+    pb.finish_and_clear();
+    println!("{}", serde_json::to_string_pretty(&v)?);
+    Ok(())
+}
+
+async fn run_cancel_cmd(client: &AppStoreConnectClient, run_id: &str) -> Result<()> {
+    let pb = spinner("Cancelling run...");
+    let res = client.cancel_build_run(run_id).await;
+    pb.finish_and_clear();
+    match res {
+        Ok(_) => println!("Run {} cancellation requested", run_id),
+        Err(e) => eprintln!("Failed to cancel run: {}", e),
+    }
+    Ok(())
+}
+
+fn extract_url_fields(v: &Value) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    if let Some(attrs) = v.get("attributes") {
+        for key in ["url", "downloadUrl", "fileUrl", "logUrl", "artifactUrl", "browserDownloadUrl"] {
+            if let Some(s) = attrs.get(key).and_then(|x| x.as_str()) {
+                out.push((key.to_string(), s.to_string()));
+            }
+        }
+        if let Some(name) = attrs.get("name").and_then(|x| x.as_str()) {
+            if !out.is_empty() { out.insert(0, ("name".into(), name.to_string())); }
+        }
+        if let Some(filename) = attrs.get("fileName").and_then(|x| x.as_str()) {
+            if !out.is_empty() { out.insert(0, ("fileName".into(), filename.to_string())); }
+        }
+    }
+    if let Some(links) = v.get("links") {
+        for key in ["download", "self", "related", "web"] {
+            if let Some(s) = links.get(key).and_then(|x| x.as_str()) {
+                out.push((format!("links.{}", key), s.to_string()));
+            }
+        }
+    }
+    out
+}
+
+async fn run_artifacts_cmd(client: &AppStoreConnectClient, run_id: &str) -> Result<()> {
+    let pb = spinner("Loading artifacts...");
+    let arts = client.list_artifacts_for_run(run_id).await;
+    pb.finish_and_clear();
+    match arts {
+        Ok(list) => {
+            if list.is_empty() { println!("No artifacts found"); return Ok(()); }
+            for a in list {
+                let id = resource_id(&a);
+                let name = resource_name(&a);
+                println!("{}\t{}", id, name);
+                let urls = extract_url_fields(&a);
+                for (k, u) in urls { println!("  {}: {}", k, u); }
+            }
+        }
+        Err(e) => eprintln!("Failed to list artifacts: {}", e),
+    }
+    Ok(())
+}
+
+async fn run_logs_cmd(client: &AppStoreConnectClient, run_id: &str) -> Result<()> {
+    let pb = spinner("Loading logs...");
+    let logs = client.list_logs_for_run(run_id).await;
+    pb.finish_and_clear();
+    match logs {
+        Ok(list) => {
+            if list.is_empty() { println!("No logs found"); return Ok(()); }
+            for l in list {
+                let id = resource_id(&l);
+                let name = resource_name(&l);
+                println!("{}\t{}", id, name);
+                let urls = extract_url_fields(&l);
+                for (k, u) in urls { println!("  {}: {}", k, u); }
+            }
+        }
+        Err(e) => eprintln!("Failed to list logs: {}", e),
+    }
+    Ok(())
+}
+
 async fn browse_flow(client: &AppStoreConnectClient) -> Result<()> {
     let theme = ColorfulTheme::default();
 
-    // Products
-    let pb = spinner("Loading products...");
-    let products = client.list_ci_products().await?;
-    pb.finish_and_clear();
+    // Level 1: Products (with Back/Exit not needed at root)
+    let products = {
+        let pb = spinner("Loading products...");
+        let p = client.list_ci_products().await?;
+        pb.finish_and_clear();
+        p
+    };
     if products.is_empty() {
         println!("No products available");
         return Ok(());
     }
-    let prod_names: Vec<String> = products.iter().map(resource_name).collect();
-    let prod_index = Select::with_theme(&theme)
-        .with_prompt("Select a product")
-        .default(0)
-        .items(&prod_names)
-        .interact()?;
-    let product = &products[prod_index];
-    let product_id = resource_id(product);
 
-    // Workflows
-    let pb = spinner("Loading workflows...");
-    let workflows = client.list_workflows_for_product(&product_id).await?;
-    pb.finish_and_clear();
-    if workflows.is_empty() {
-        println!("No workflows for this product");
-        return Ok(());
-    }
-    let wf_names: Vec<String> = workflows.iter().map(resource_name).collect();
-    let wf_index = Select::with_theme(&theme)
-        .with_prompt("Select a workflow")
-        .default(0)
-        .items(&wf_names)
-        .interact()?;
-    let workflow = &workflows[wf_index];
-    let workflow_id = resource_id(workflow);
-
-    // Repository -> Branches
-    let pb = spinner("Resolving repository...");
-    let repos = client.list_repositories_for_product(&product_id).await?;
-    pb.finish_and_clear();
-    if repos.is_empty() {
-        println!("No repositories attached to this product");
-        return Ok(());
-    }
-    let repo_id = resource_id(&repos[0]);
-
-    let pb = spinner("Loading branches...");
-    let branches = client.list_branches_for_repository(&repo_id).await?;
-    pb.finish_and_clear();
-    if branches.is_empty() {
-        println!("No branches found");
-        return Ok(());
-    }
-    let br_names: Vec<String> = branches.iter().map(resource_name).collect();
-    let br_index = Select::with_theme(&theme)
-        .with_prompt("Select a branch")
-        .default(0)
-        .items(&br_names)
-        .interact()?;
-    let branch = &branches[br_index];
-    let branch_id = resource_id(branch);
-
-    // Action menu
+    let mut product_idx: Option<usize> = None;
     loop {
-        let actions = vec![
-            "Start build run",
-            "Show recent runs",
-            "Exit",
-        ];
-        let idx = Select::with_theme(&theme)
-            .with_prompt("Choose action")
-            .items(&actions)
-            .default(0)
-            .interact()?;
-        match idx {
-            0 => {
-                let pb = spinner("Starting build run...");
-                let res = client.start_build_run(&workflow_id, &branch_id).await;
-                pb.finish_and_clear();
-                match res {
-                    Ok(v) => {
-                        let id = v.get("data").and_then(|d| d.get("id")).and_then(|s| s.as_str()).unwrap_or("<unknown>");
-                        println!("Build run created: {}", id);
-                    }
-                    Err(e) => {
-                        eprintln!("Failed to start build: {}", e);
-                    }
-                }
+        // Pick product
+        if product_idx.is_none() {
+            let mut items: Vec<String> = products.iter().map(resource_name).collect();
+            items.push("Exit".into());
+            let idx = Select::with_theme(&theme)
+                .with_prompt("Select a product")
+                .default(0)
+                .items(&items)
+                .interact()?;
+            if idx == items.len() - 1 { return Ok(()); }
+            product_idx = Some(idx);
+        }
+        let product = &products[product_idx.unwrap()];
+        let product_id = resource_id(product);
+
+        // Level 2: Workflows
+        let workflows = {
+            let pb = spinner("Loading workflows...");
+            let w = client.list_workflows_for_product(&product_id).await?;
+            pb.finish_and_clear();
+            w
+        };
+        if workflows.is_empty() {
+            println!("No workflows for this product");
+            product_idx = None; // force reselect product
+            continue;
+        }
+        let mut workflow_idx: Option<usize> = None;
+        loop {
+            if workflow_idx.is_none() {
+                let mut items: Vec<String> = workflows.iter().map(resource_name).collect();
+                items.push("Back".into());
+                items.push("Exit".into());
+                let idx = Select::with_theme(&theme)
+                    .with_prompt("Select a workflow")
+                    .default(0)
+                    .items(&items)
+                    .interact()?;
+                if idx == items.len() - 1 { return Ok(()); }
+                if idx == items.len() - 2 { workflow_idx = None; product_idx = None; break; }
+                workflow_idx = Some(idx);
             }
-            1 => {
-                let pb = spinner("Loading recent runs...");
-                let runs = client.list_build_runs_for_workflow(&workflow_id).await;
+            let workflow = &workflows[workflow_idx.unwrap()];
+            let workflow_id = resource_id(workflow);
+
+            // Level 3: Branches
+            let repos = {
+                let pb = spinner("Resolving repository...");
+                let r = client.list_repositories_for_product(&product_id).await?;
                 pb.finish_and_clear();
-                match runs {
-                    Ok(list) => {
-                        if list.is_empty() { println!("No runs found"); continue; }
-                        for r in list.iter().take(20) {
-                            let rid = resource_id(r);
-                            // Try to derive a status text
-                            let status = r
-                                .get("attributes").and_then(|a| a.get("buildResult")).and_then(|s| s.as_str())
-                                .or_else(|| r.get("attributes").and_then(|a| a.get("status")).and_then(|s| s.as_str()))
-                                .unwrap_or("<unknown>");
-                            println!("{}\t{}", rid, status);
+                r
+            };
+            if repos.is_empty() {
+                println!("No repositories attached to this product");
+                workflow_idx = None; // back to workflow selection
+                continue;
+            }
+            let repo_id = resource_id(&repos[0]);
+            let branches = {
+                let pb = spinner("Loading branches...");
+                let b = client.list_branches_for_repository(&repo_id).await?;
+                pb.finish_and_clear();
+                b
+            };
+            if branches.is_empty() {
+                println!("No branches found");
+                workflow_idx = None;
+                continue;
+            }
+
+            let mut branch_idx: Option<usize> = None;
+            loop {
+                if branch_idx.is_none() {
+                    let mut items: Vec<String> = branches.iter().map(resource_name).collect();
+                    items.push("Back".into());
+                    items.push("Exit".into());
+                    let idx = Select::with_theme(&theme)
+                        .with_prompt("Select a branch")
+                        .default(0)
+                        .items(&items)
+                        .interact()?;
+                    if idx == items.len() - 1 { return Ok(()); }
+                    if idx == items.len() - 2 { branch_idx = None; break; }
+                    branch_idx = Some(idx);
+                }
+
+                let branch = &branches[branch_idx.unwrap()];
+                let branch_id = resource_id(branch);
+
+                // Action menu for selected (product, workflow, branch)
+                let actions = vec![
+                    "Start build run",
+                    "Show recent runs",
+                    "Back",
+                    "Exit",
+                ];
+                let idx = Select::with_theme(&theme)
+                    .with_prompt("Choose action")
+                    .items(&actions)
+                    .default(0)
+                    .interact()?;
+                match idx {
+                    0 => {
+                        let pb = spinner("Starting build run...");
+                        let res = client.start_build_run(&workflow_id, &branch_id).await;
+                        pb.finish_and_clear();
+                        match res {
+                            Ok(v) => {
+                                let id = v.get("data").and_then(|d| d.get("id")).and_then(|s| s.as_str()).unwrap_or("<unknown>");
+                                println!("Build run created: {}", id);
+                            }
+                            Err(e) => eprintln!("Failed to start build: {}", e),
                         }
                     }
-                    Err(e) => eprintln!("Failed to list runs: {}", e),
+                    1 => {
+                        // Runs submenu
+                        runs_submenu(client, &theme, &workflow_id).await?;
+                    }
+                    2 => { branch_idx = None; continue; }
+                    _ => return Ok(()),
                 }
             }
-            _ => break,
         }
     }
+}
 
+async fn runs_submenu(client: &AppStoreConnectClient, theme: &ColorfulTheme, workflow_id: &str) -> Result<()> {
+    loop {
+        let runs = {
+            let pb = spinner("Loading runs...");
+            let r = client.list_build_runs_for_workflow(workflow_id).await;
+            pb.finish_and_clear();
+            r
+        }?;
+        if runs.is_empty() { println!("No runs found"); return Ok(()); }
+
+        let mut items: Vec<String> = runs.iter().map(|r| {
+            let rid = resource_id(r);
+            let status = r
+                .get("attributes").and_then(|a| a.get("buildResult")).and_then(|s| s.as_str())
+                .or_else(|| r.get("attributes").and_then(|a| a.get("status")).and_then(|s| s.as_str()))
+                .unwrap_or("<unknown>");
+            format!("{} - {}", rid, status)
+        }).collect();
+        items.push("Back".into());
+        items.push("Exit".into());
+        let idx = Select::with_theme(theme)
+            .with_prompt("Select a run")
+            .default(0)
+            .items(&items)
+            .interact()?;
+        if idx == items.len() - 1 { return Ok(()); }
+        if idx == items.len() - 2 { break; }
+        let run = &runs[idx];
+        let run_id = resource_id(run);
+
+        // Actions for run
+        let actions = vec![
+            "View details",
+            "Cancel run",
+            "List artifacts",
+            "List logs",
+            "Open first artifact URL",
+            "Back",
+            "Exit",
+        ];
+        let aidx = Select::with_theme(theme)
+            .with_prompt("Run actions")
+            .default(0)
+            .items(&actions)
+            .interact()?;
+        match aidx {
+            0 => { run_info_cmd(client, &run_id).await?; }
+            1 => { run_cancel_cmd(client, &run_id).await?; }
+            2 => { run_artifacts_cmd(client, &run_id).await?; }
+            3 => { run_logs_cmd(client, &run_id).await?; }
+            4 => {
+                // Best-effort: try to open a URL from artifacts
+                let arts = client.list_artifacts_for_run(&run_id).await;
+                match arts {
+                    Ok(list) => {
+                        if let Some(first) = list.first() {
+                            if let Some((_, url)) = extract_url_fields(first).into_iter().find(|(k, _)| k.contains("url")) {
+                                let _ = open::that(url);
+                            } else {
+                                println!("No URL available on first artifact");
+                            }
+                        } else {
+                            println!("No artifacts found");
+                        }
+                    }
+                    Err(e) => eprintln!("Failed to load artifacts: {}", e),
+                }
+            }
+            5 => continue, // back to runs list
+            _ => return Ok(()),
+        }
+    }
     Ok(())
 }
