@@ -11,8 +11,7 @@ use serde_json::{json, Value};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
-use std::cmp::Ordering;
-pub use xcloud::*;
+use xcloud::{compare_runs_desc, is_branch_git_ref, pretty_run_status};
 
 #[derive(Parser, Debug)]
 #[command(name = "xcloud", version, about = "Xcode Cloud CLI in Rust", long_about = None)]
@@ -139,28 +138,7 @@ impl AppStoreConnectClient {
         Ok(Self { http, base_url, config, cached_token: tokio::sync::Mutex::new(None), static_token: None, verbose })
     }
 
-    fn new_with_base_url(config: Config, verbose: bool, base: &str) -> Result<Self> {
-        let http = Client::builder()
-            .user_agent("xcloud/0.1")
-            .use_rustls_tls()
-            .build()?;
-        let mut base_url = Url::parse(base)?;
-        if !base_url.as_str().ends_with('/') {
-            base_url = Url::parse(&(base_url.as_str().to_string() + "/"))?;
-        }
-        Ok(Self { http, base_url, config, cached_token: tokio::sync::Mutex::new(None), static_token: None, verbose })
-    }
-
-    #[cfg(test)]
-    fn new_test(base: &str) -> Result<Self> {
-        let http = Client::builder().build()?;
-        let mut base_url = Url::parse(base)?;
-        if !base_url.as_str().ends_with('/') {
-            base_url = Url::parse(&(base_url.as_str().to_string() + "/"))?;
-        }
-        let config = Config { issuer_id: String::new(), key_id: String::new(), p8_private_key_pem: String::new() };
-        Ok(Self { http, base_url, config, cached_token: tokio::sync::Mutex::new(None), static_token: Some("TEST".into()), verbose: false })
-    }
+    
 
     async fn bearer(&self) -> Result<String> {
         if let Some(tok) = &self.static_token { return Ok(tok.clone()); }
@@ -475,35 +453,7 @@ fn resource_id(resource: &Value) -> String {
         .to_string()
 }
 
-pub fn pretty_run_status(run: &Value) -> String {
-    let a = run.get("attributes");
-    let status = a
-        .and_then(|a| a.get("buildResult")).and_then(|s| s.as_str())
-        .or_else(|| a.and_then(|a| a.get("executionProgress")).and_then(|s| s.as_str()))
-        .or_else(|| a.and_then(|a| a.get("completionStatus")).and_then(|s| s.as_str()))
-        .or_else(|| a.and_then(|a| a.get("status")).and_then(|s| s.as_str()))
-        .unwrap_or("UNKNOWN");
-    status.to_string()
-}
-
-pub fn compare_runs_desc(a: &Value, b: &Value) -> Ordering {
-    let ca = a.get("attributes").and_then(|x| x.get("createdDate")).and_then(|s| s.as_str());
-    let cb = b.get("attributes").and_then(|x| x.get("createdDate")).and_then(|s| s.as_str());
-    match (ca, cb) {
-        (Some(a), Some(b)) => b.cmp(a), // newer first
-        (Some(_), None) => Ordering::Less,
-        (None, Some(_)) => Ordering::Greater,
-        _ => resource_id(b).cmp(&resource_id(a)),
-    }
-}
-
-pub fn is_branch_git_ref(v: &Value) -> bool {
-    v.get("attributes")
-        .and_then(|a| a.get("canonicalName"))
-        .and_then(|s| s.as_str())
-        .map(|s| s.starts_with("refs/heads/") || s.starts_with("heads/") || s.contains("/heads/"))
-        .unwrap_or(false)
-}
+// helpers now live in lib.rs and are imported above
 
 fn spinner(msg: &str) -> ProgressBar {
     let pb = ProgressBar::new_spinner();
@@ -537,10 +487,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-// Re-export selected helpers for tests via crate name
-pub mod xcloud {
-    pub use super::{compare_runs_desc, is_branch_git_ref, pretty_run_status};
-}
+// tests import helpers from the lib crate
 
 async fn list_products_cmd(client: &AppStoreConnectClient) -> Result<()> {
     let pb = spinner("Loading products...");
