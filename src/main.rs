@@ -712,7 +712,7 @@ async fn browse_flow(client: &AppStoreConnectClient) -> Result<()> {
                     .items(&items)
                     .interact()?;
                 if idx == items.len() - 1 { return Ok(()); }
-                if idx == items.len() - 2 { workflow_idx = None; product_idx = None; break; }
+                if idx == items.len() - 2 { product_idx = None; break; }
                 workflow_idx = Some(idx);
             }
             let workflow = &workflows[workflow_idx.unwrap()];
@@ -755,7 +755,7 @@ async fn browse_flow(client: &AppStoreConnectClient) -> Result<()> {
                         .items(&items)
                         .interact()?;
                     if idx == items.len() - 1 { return Ok(()); }
-                    if idx == items.len() - 2 { branch_idx = None; break; }
+                    if idx == items.len() - 2 { break; }
                     branch_idx = Some(idx);
                 }
 
