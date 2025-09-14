@@ -630,7 +630,7 @@ async fn run_artifacts_cmd(client: &AppStoreConnectClient, run_id: &str) -> Resu
             .default(0)
             .items(&action_items)
             .interact()?;
-        if aidx == action_items.len() - 1 { return Ok(()); }
+        if aidx == action_items.len() - 1 { std::process::exit(0); }
         if aidx == action_items.len() - 2 { break; }
         let action = &actions[aidx];
         let action_id = resource_id(action);
@@ -650,7 +650,7 @@ async fn run_artifacts_cmd(client: &AppStoreConnectClient, run_id: &str) -> Resu
             .default(0)
             .items(&art_items)
             .interact()?;
-        if aridx == art_items.len() - 1 { return Ok(()); }
+        if aridx == art_items.len() - 1 { std::process::exit(0); }
         if aridx == art_items.len() - 2 { continue; }
         let art = &arts[aridx];
         let art_id = resource_id(art);
@@ -711,7 +711,7 @@ async fn browse_flow(client: &AppStoreConnectClient) -> Result<()> {
                 .default(0)
                 .items(&items)
                 .interact()?;
-            if idx == items.len() - 1 { return Ok(()); }
+            if idx == items.len() - 1 { std::process::exit(0); }
             product_idx = Some(idx);
         }
         let product = &products[product_idx.unwrap()];
@@ -740,7 +740,7 @@ async fn browse_flow(client: &AppStoreConnectClient) -> Result<()> {
                     .default(0)
                     .items(&items)
                     .interact()?;
-                if idx == items.len() - 1 { return Ok(()); }
+                if idx == items.len() - 1 { std::process::exit(0); }
                 if idx == items.len() - 2 { product_idx = None; break; }
                 workflow_idx = Some(idx);
             }
@@ -784,7 +784,7 @@ async fn browse_flow(client: &AppStoreConnectClient) -> Result<()> {
                         .default(0)
                         .items(&items)
                         .interact()?;
-                    if idx == items.len() - 1 { return Ok(()); }
+                    if idx == items.len() - 1 { std::process::exit(0); }
                     if idx == items.len() - 2 { back_to_workflows = true; }
                     if back_to_workflows { break; }
                     branch_idx = Some(idx);
@@ -855,7 +855,7 @@ async fn runs_submenu(client: &AppStoreConnectClient, theme: &ColorfulTheme, wor
             .default(0)
             .items(&items)
             .interact()?;
-        if idx == items.len() - 1 { return Ok(()); }
+        if idx == items.len() - 1 { std::process::exit(0); }
         if idx == items.len() - 2 { break; }
         let run = &runs[idx];
         let run_id = resource_id(run);
