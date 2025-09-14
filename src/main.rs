@@ -611,72 +611,58 @@ async fn run_info_cmd(client: &AppStoreConnectClient, run_id: &str) -> Result<()
 
 // removed cancel run action per API constraints
 
-fn extract_url_fields(v: &Value) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    if let Some(attrs) = v.get("attributes") {
-        for key in ["url", "downloadUrl", "fileUrl", "logUrl", "artifactUrl", "browserDownloadUrl"] {
-            if let Some(s) = attrs.get(key).and_then(|x| x.as_str()) {
-                out.push((key.to_string(), s.to_string()));
-            }
-        }
-        if let Some(name) = attrs.get("name").and_then(|x| x.as_str()) {
-            if !out.is_empty() { out.insert(0, ("name".into(), name.to_string())); }
-        }
-        if let Some(filename) = attrs.get("fileName").and_then(|x| x.as_str()) {
-            if !out.is_empty() { out.insert(0, ("fileName".into(), filename.to_string())); }
-        }
-    }
-    if let Some(links) = v.get("links") {
-        for key in ["download", "self", "related", "web"] {
-            if let Some(s) = links.get(key).and_then(|x| x.as_str()) {
-                out.push((format!("links.{}", key), s.to_string()));
-            }
-        }
-    }
-    out
-}
+// helper removed; no longer used
 
 async fn run_artifacts_cmd(client: &AppStoreConnectClient, run_id: &str) -> Result<()> {
-    let pb = spinner("Loading actions...");
-    let acts = client.list_actions_for_run(run_id).await;
-    pb.finish_and_clear();
-    match acts {
-        Ok(actions) => {
-            if actions.is_empty() { println!("No actions found"); return Ok(()); }
-            for act in actions {
-                let aid = resource_id(&act);
-                let aname = resource_name(&act);
-                println!("Action {}\t{}", aid, aname);
-                let pb = spinner("  Loading artifacts...");
-                let arts = client.list_artifacts_for_action(&aid).await;
-                pb.finish_and_clear();
-                match arts {
-                    Ok(list) => {
-                        if list.is_empty() { println!("  (no artifacts)"); }
-                        for a in list {
-                            let id = resource_id(&a);
-                            let name = resource_name(&a);
-                            println!("  {}\t{}", id, name);
-                            // Fetch artifact details to get any URL or metadata
-                            if let Ok(details) = client.get_artifact(&id).await {
-                                if let Some(attrs) = details.get("data").and_then(|d| d.get("attributes")) {
-                                    if let Some(size) = attrs.get("fileSize").and_then(|x| x.as_i64()) {
-                                        println!("    size: {} bytes", size);
-                                    }
-                                    if let Some(state) = attrs.get("state").and_then(|x| x.as_str()) {
-                                        println!("    state: {}", state);
-                                    }
-                                }
-                                let urls = extract_url_fields(&details);
-                                for (k, u) in urls { println!("    {}: {}", k, u); }
-                            }
-                        }
-                    }
-                    Err(e) => eprintln!("  Failed to list artifacts: {}", e),
-                }
-            }
+    loop {
+        let pb = spinner("Loading actions...");
+        let actions = client.list_actions_for_run(run_id).await;
+        pb.finish_and_clear();
+        let actions = match actions { Ok(a) => a, Err(e) => { eprintln!("Failed to load actions: {}", e); return Ok(()); } };
+        if actions.is_empty() { println!("No actions found"); return Ok(()); }
+
+        let theme = ColorfulTheme::default();
+        let mut action_items: Vec<String> = actions.iter().map(resource_name).collect();
+        action_items.push("Back".into());
+        action_items.push("Exit".into());
+        let aidx = Select::with_theme(&theme)
+            .with_prompt("Select an action")
+            .default(0)
+            .items(&action_items)
+            .interact()?;
+        if aidx == action_items.len() - 1 { return Ok(()); }
+        if aidx == action_items.len() - 2 { break; }
+        let action = &actions[aidx];
+        let action_id = resource_id(action);
+
+        // List artifacts for selected action
+        let pb = spinner("Loading artifacts...");
+        let arts = client.list_artifacts_for_action(&action_id).await;
+        pb.finish_and_clear();
+        let arts = match arts { Ok(x) => x, Err(e) => { eprintln!("Failed to list artifacts: {}", e); continue; } };
+        if arts.is_empty() { println!("(no artifacts)"); continue; }
+
+        let mut art_items: Vec<String> = arts.iter().map(resource_name).collect();
+        art_items.push("Back".into());
+        art_items.push("Exit".into());
+        let aridx = Select::with_theme(&theme)
+            .with_prompt("Select an artifact")
+            .default(0)
+            .items(&art_items)
+            .interact()?;
+        if aridx == art_items.len() - 1 { return Ok(()); }
+        if aridx == art_items.len() - 2 { continue; }
+        let art = &arts[aridx];
+        let art_id = resource_id(art);
+
+        // Show artifact details
+        let pb = spinner("Loading artifact details...");
+        let details = client.get_artifact(&art_id).await;
+        pb.finish_and_clear();
+        match details {
+            Ok(v) => println!("{}", serde_json::to_string_pretty(&v)?),
+            Err(e) => eprintln!("Failed to load artifact details: {}", e),
         }
-        Err(e) => eprintln!("Failed to load actions: {}", e),
     }
     Ok(())
 }
@@ -787,6 +773,7 @@ async fn browse_flow(client: &AppStoreConnectClient) -> Result<()> {
             }
 
             let mut branch_idx: Option<usize> = None;
+            let mut back_to_workflows = false;
             loop {
                 if branch_idx.is_none() {
                     let mut items: Vec<String> = branches.iter().map(resource_name).collect();
@@ -798,7 +785,8 @@ async fn browse_flow(client: &AppStoreConnectClient) -> Result<()> {
                         .items(&items)
                         .interact()?;
                     if idx == items.len() - 1 { return Ok(()); }
-                    if idx == items.len() - 2 { break; }
+                    if idx == items.len() - 2 { back_to_workflows = true; }
+                    if back_to_workflows { break; }
                     branch_idx = Some(idx);
                 }
 
@@ -838,6 +826,7 @@ async fn browse_flow(client: &AppStoreConnectClient) -> Result<()> {
                     _ => return Ok(()),
                 }
             }
+            if back_to_workflows { workflow_idx = None; continue; }
         }
     }
 }
