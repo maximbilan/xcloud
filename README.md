@@ -1,4 +1,4 @@
-# xcloud 🚀
+# xcloud ☁️
 
 A powerful command-line interface for Apple's Xcode Cloud, built in Rust. Manage your CI/CD workflows, build runs, and artifacts directly from your terminal.
 
