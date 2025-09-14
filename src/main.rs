@@ -12,6 +12,7 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::cmp::Ordering;
+pub use xcloud::*;
 
 #[derive(Parser, Debug)]
 #[command(name = "xcloud", version, about = "Xcode Cloud CLI in Rust", long_about = None)]
@@ -124,6 +125,7 @@ struct AppStoreConnectClient {
     base_url: Url,
     config: Config,
     cached_token: tokio::sync::Mutex<Option<(String, SystemTime)>>,
+    static_token: Option<String>,
     verbose: bool,
 }
 
@@ -134,10 +136,34 @@ impl AppStoreConnectClient {
             .use_rustls_tls()
             .build()?;
         let base_url = Url::parse("https://api.appstoreconnect.apple.com/")?;
-        Ok(Self { http, base_url, config, cached_token: tokio::sync::Mutex::new(None), verbose })
+        Ok(Self { http, base_url, config, cached_token: tokio::sync::Mutex::new(None), static_token: None, verbose })
+    }
+
+    fn new_with_base_url(config: Config, verbose: bool, base: &str) -> Result<Self> {
+        let http = Client::builder()
+            .user_agent("xcloud/0.1")
+            .use_rustls_tls()
+            .build()?;
+        let mut base_url = Url::parse(base)?;
+        if !base_url.as_str().ends_with('/') {
+            base_url = Url::parse(&(base_url.as_str().to_string() + "/"))?;
+        }
+        Ok(Self { http, base_url, config, cached_token: tokio::sync::Mutex::new(None), static_token: None, verbose })
+    }
+
+    #[cfg(test)]
+    fn new_test(base: &str) -> Result<Self> {
+        let http = Client::builder().build()?;
+        let mut base_url = Url::parse(base)?;
+        if !base_url.as_str().ends_with('/') {
+            base_url = Url::parse(&(base_url.as_str().to_string() + "/"))?;
+        }
+        let config = Config { issuer_id: String::new(), key_id: String::new(), p8_private_key_pem: String::new() };
+        Ok(Self { http, base_url, config, cached_token: tokio::sync::Mutex::new(None), static_token: Some("TEST".into()), verbose: false })
     }
 
     async fn bearer(&self) -> Result<String> {
+        if let Some(tok) = &self.static_token { return Ok(tok.clone()); }
         {
             let guard = self.cached_token.lock().await;
             if let Some((token, exp_time)) = &*guard {
@@ -338,15 +364,7 @@ impl AppStoreConnectClient {
             .await?;
         let mut branches = Vec::new();
         for r in all {
-            let is_branch = r
-                .get("attributes")
-                .and_then(|a| a.get("canonicalName"))
-                .and_then(|s| s.as_str())
-                .map(|s| s.starts_with("refs/heads/") || s.starts_with("heads/") || s.contains("/heads/"))
-                .unwrap_or(false);
-            if is_branch {
-                branches.push(r);
-            }
+            if is_branch_git_ref(&r) { branches.push(r); }
         }
         Ok(branches)
     }
@@ -457,7 +475,7 @@ fn resource_id(resource: &Value) -> String {
         .to_string()
 }
 
-fn pretty_run_status(run: &Value) -> String {
+pub fn pretty_run_status(run: &Value) -> String {
     let a = run.get("attributes");
     let status = a
         .and_then(|a| a.get("buildResult")).and_then(|s| s.as_str())
@@ -468,7 +486,7 @@ fn pretty_run_status(run: &Value) -> String {
     status.to_string()
 }
 
-fn compare_runs_desc(a: &Value, b: &Value) -> Ordering {
+pub fn compare_runs_desc(a: &Value, b: &Value) -> Ordering {
     let ca = a.get("attributes").and_then(|x| x.get("createdDate")).and_then(|s| s.as_str());
     let cb = b.get("attributes").and_then(|x| x.get("createdDate")).and_then(|s| s.as_str());
     match (ca, cb) {
@@ -477,6 +495,14 @@ fn compare_runs_desc(a: &Value, b: &Value) -> Ordering {
         (None, Some(_)) => Ordering::Greater,
         _ => resource_id(b).cmp(&resource_id(a)),
     }
+}
+
+pub fn is_branch_git_ref(v: &Value) -> bool {
+    v.get("attributes")
+        .and_then(|a| a.get("canonicalName"))
+        .and_then(|s| s.as_str())
+        .map(|s| s.starts_with("refs/heads/") || s.starts_with("heads/") || s.contains("/heads/"))
+        .unwrap_or(false)
 }
 
 fn spinner(msg: &str) -> ProgressBar {
@@ -509,6 +535,11 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+// Re-export selected helpers for tests via crate name
+pub mod xcloud {
+    pub use super::{compare_runs_desc, is_branch_git_ref, pretty_run_status};
 }
 
 async fn list_products_cmd(client: &AppStoreConnectClient) -> Result<()> {
