@@ -8,6 +8,9 @@ use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::fs::File;
+use std::io::{BufWriter, Write};
+use std::path::PathBuf;
 use std::cmp::Ordering;
 
 #[derive(Parser, Debug)]
@@ -386,6 +389,30 @@ impl AppStoreConnectClient {
         self.get(&format!("v1/ciArtifacts/{}", artifact_id)).await
     }
 
+    async fn download_artifact(&self, artifact_id: &str, dest_path: &PathBuf) -> Result<()> {
+        // Fetch detail to get download URL
+        let detail = self.get_artifact(artifact_id).await?;
+        // The download URL can be in attributes or links; check common fields
+        let url_opt = detail
+            .get("data")
+            .and_then(|d| d.get("attributes"))
+            .and_then(|a| a.get("fileUrl").or_else(|| a.get("downloadUrl")))
+            .and_then(|s| s.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| detail.get("links").and_then(|l| l.get("download")).and_then(|s| s.as_str()).map(|s| s.to_string()));
+        let Some(url) = url_opt else { return Err(anyhow!("Artifact does not expose a download URL")); };
+
+        let bearer = self.bearer().await?;
+        let mut resp = self.http.get(url).header("Authorization", format!("Bearer {}", bearer)).send().await?;
+        if !resp.status().is_success() { return Err(anyhow!("Download failed: {}", resp.status())); }
+        let mut file = BufWriter::new(File::create(dest_path)?);
+        while let Some(chunk) = resp.chunk().await? {
+            file.write_all(&chunk)?;
+        }
+        file.flush()?;
+        Ok(())
+    }
+
     async fn list_test_results_for_run(&self, run_id: &str) -> Result<Vec<Value>> {
         // Build run -> actions -> testResults relationship on actions
         // First try the documented endpoint on actions via include
@@ -630,7 +657,7 @@ async fn run_artifacts_cmd(client: &AppStoreConnectClient, run_id: &str) -> Resu
             .default(0)
             .items(&action_items)
             .interact()?;
-        if aidx == action_items.len() - 1 { return Ok(()); }
+        if aidx == action_items.len() - 1 { std::process::exit(0); }
         if aidx == action_items.len() - 2 { break; }
         let action = &actions[aidx];
         let action_id = resource_id(action);
@@ -650,7 +677,7 @@ async fn run_artifacts_cmd(client: &AppStoreConnectClient, run_id: &str) -> Resu
             .default(0)
             .items(&art_items)
             .interact()?;
-        if aridx == art_items.len() - 1 { return Ok(()); }
+        if aridx == art_items.len() - 1 { std::process::exit(0); }
         if aridx == art_items.len() - 2 { continue; }
         let art = &arts[aridx];
         let art_id = resource_id(art);
@@ -660,7 +687,37 @@ async fn run_artifacts_cmd(client: &AppStoreConnectClient, run_id: &str) -> Resu
         let details = client.get_artifact(&art_id).await;
         pb.finish_and_clear();
         match details {
-            Ok(v) => println!("{}", serde_json::to_string_pretty(&v)?),
+            Ok(v) => {
+                println!("{}", serde_json::to_string_pretty(&v)?);
+                // Offer to download
+                let choices = vec!["Download", "Back", "Exit"];
+                let cidx = Select::with_theme(&theme)
+                    .with_prompt("Artifact action")
+                    .default(0)
+                    .items(&choices)
+                    .interact()?;
+                if cidx == 2 { std::process::exit(0); }
+                if cidx == 0 {
+                    let fallback = format!("{}.bin", art_id);
+                    let filename_owned = v.get("data").and_then(|d| d.get("attributes")).and_then(|a| a.get("fileName")).and_then(|s| s.as_str()).map(|s| s.to_string()).unwrap_or(fallback);
+                    let mut dest = PathBuf::from(&filename_owned);
+                    // if file exists, append suffix
+                    let mut counter = 1;
+                    while dest.exists() {
+                        let alt = format!("{}({}).{}",
+                            dest.file_stem().and_then(|s| s.to_str()).unwrap_or("artifact"),
+                            counter,
+                            dest.extension().and_then(|s| s.to_str()).unwrap_or("bin")
+                        );
+                        dest = PathBuf::from(alt);
+                        counter += 1;
+                    }
+                    let pb = spinner(&format!("Downloading to {:?}...", dest));
+                    let r = client.download_artifact(&art_id, &dest).await;
+                    pb.finish_and_clear();
+                    match r { Ok(_) => println!("Saved to {:?}", dest), Err(e) => eprintln!("Download failed: {}", e) }
+                }
+            }
             Err(e) => eprintln!("Failed to load artifact details: {}", e),
         }
     }
@@ -711,7 +768,7 @@ async fn browse_flow(client: &AppStoreConnectClient) -> Result<()> {
                 .default(0)
                 .items(&items)
                 .interact()?;
-            if idx == items.len() - 1 { return Ok(()); }
+            if idx == items.len() - 1 { std::process::exit(0); }
             product_idx = Some(idx);
         }
         let product = &products[product_idx.unwrap()];
@@ -740,7 +797,7 @@ async fn browse_flow(client: &AppStoreConnectClient) -> Result<()> {
                     .default(0)
                     .items(&items)
                     .interact()?;
-                if idx == items.len() - 1 { return Ok(()); }
+                if idx == items.len() - 1 { std::process::exit(0); }
                 if idx == items.len() - 2 { product_idx = None; break; }
                 workflow_idx = Some(idx);
             }
@@ -784,7 +841,7 @@ async fn browse_flow(client: &AppStoreConnectClient) -> Result<()> {
                         .default(0)
                         .items(&items)
                         .interact()?;
-                    if idx == items.len() - 1 { return Ok(()); }
+                    if idx == items.len() - 1 { std::process::exit(0); }
                     if idx == items.len() - 2 { back_to_workflows = true; }
                     if back_to_workflows { break; }
                     branch_idx = Some(idx);
@@ -855,7 +912,7 @@ async fn runs_submenu(client: &AppStoreConnectClient, theme: &ColorfulTheme, wor
             .default(0)
             .items(&items)
             .interact()?;
-        if idx == items.len() - 1 { return Ok(()); }
+        if idx == items.len() - 1 { std::process::exit(0); }
         if idx == items.len() - 2 { break; }
         let run = &runs[idx];
         let run_id = resource_id(run);
