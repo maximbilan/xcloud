@@ -21,6 +21,13 @@ open = "5"
 indicatif = "0.17"
 futures-util = "0.3"
 
+[features]
+default = []
+http-mock = ["dep:httpmock"]
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+httpmock = { version = "0.7", optional = true }
+
 [dev-dependencies]
 assert_cmd = "2.0"
 predicates = "3.1"

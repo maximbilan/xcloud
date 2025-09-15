@@ -77,6 +77,12 @@ impl AppStoreConnectClient {
         self
     }
 
+    /// Overrides the base URL for API requests. Useful for tests with a mock server.
+    pub fn with_base_url(mut self, base_url: Url) -> Self {
+        self.base_url = base_url;
+        self
+    }
+
     pub async fn bearer(&self) -> Result<String> {
         if let Some(tok) = &self.static_token {
             return Ok(tok.clone());
