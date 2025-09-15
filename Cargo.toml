@@ -20,6 +20,7 @@ toml = "0.8"
 open = "5"
 indicatif = "0.17"
 futures-util = "0.3"
+url = "2.5"
 
 [features]
 default = []

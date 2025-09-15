@@ -2,7 +2,7 @@
 
 use httpmock::{Method::GET, MockServer};
 use serde_json::json;
-use xcloud::{asc::AppStoreConnectClient, Config};
+use xcloud::{AppStoreConnectClient, Config};
 
 #[tokio::test]
 async fn list_ci_products_uses_custom_base_url() {
