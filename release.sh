@@ -31,7 +31,7 @@ gh release upload "${LATEST_TAG}" "target/release/${PACKAGE_NAME}-${VERSION}.tar
 
 # 4. Generate a Homebrew formula
 echo "Generating Homebrew formula..."
-FORMULA_URL="https://github.com/${GITHUB_USER}/${PACKAGE_NAME}/releases/download/v${VERSION}/${PACKAGE_NAME}-${VERSION}.tar.gz"
+FORMULA_URL="https://github.com/${GITHUB_USER}/${PACKAGE_NAME}/releases/download/${LATEST_TAG}/${PACKAGE_NAME}-${VERSION}.tar.gz"
 SHA256=$(shasum -a 256 "target/release/${PACKAGE_NAME}-${VERSION}.tar.gz" | awk '{print $1}')
 
 cat > "${PACKAGE_NAME}.rb" <<EOF
@@ -50,12 +50,14 @@ EOF
 
 # 5. Commit the formula to a Homebrew tap
 echo "Committing formula to Homebrew tap..."
-git clone "https://github.com/${GITHUB_USER}/${HOMEBREW_TAP_REPO}.git"
-mkdir -p "${HOMEBREW_TAP_REPO}/Formula"
-mv "${PACKAGE_NAME}.rb" "${HOMEBREW_TAP_REPO}/Formula/"
-cd "${HOMEBREW_TAP_REPO}"
+TMP_DIR=$(mktemp -d)
+git clone "https://github.com/${GITHUB_USER}/${HOMEBREW_TAP_REPO}.git" "$TMP_DIR"
+mkdir -p "${TMP_DIR}/Formula"
+mv "${PACKAGE_NAME}.rb" "${TMP_DIR}/Formula/"
+cd "$TMP_DIR"
 git add "Formula/${PACKAGE_NAME}.rb"
 git commit -m "feat: Add ${PACKAGE_NAME} v${VERSION}"
 git push
+rm -rf "$TMP_DIR"
 
 echo "Done!"
