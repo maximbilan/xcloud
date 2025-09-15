@@ -36,6 +36,12 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
+      - name: Show dispatch inputs
+        run: |
+          echo "tap=${{ inputs.tap }}"
+          echo "formula=${{ inputs.formula }}"
+          echo "dry_run=${{ inputs.dry_run }}"
+          echo "tag=${{ inputs.tag }}"
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -92,7 +98,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Show computed values (dry run)
-        if: ${{ inputs.dry_run == true }}
+        if: ${{ fromJSON(inputs.dry_run) }}
         run: |
           echo "Tap:           ${{ inputs.tap }}"
           echo "Formula:       ${{ inputs.formula }}"
@@ -102,7 +108,7 @@ jobs:
           echo "Skipping bump-formula-pr due to dry_run=true"
 
       - name: Bump formula in tap
-        if: ${{ inputs.dry_run != true }}
+        if: ${{ !fromJSON(inputs.dry_run) }}
         env:
           HOMEBREW_GITHUB_API_TOKEN: ${{ secrets.HOMEBREW_GITHUB_API_TOKEN }}
         run: |
