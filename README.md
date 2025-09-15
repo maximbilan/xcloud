@@ -13,6 +13,10 @@ A powerful command-line interface for Apple's Xcode Cloud, built in Rust. Manage
 - 🔑 **Token Management**: Generate and manage App Store Connect API tokens
 - 📋 **Raw Data Access**: Get detailed JSON information for debugging and automation
 
+## Demo
+
+<img src="demo.gif" width="600"/>
+
 ## Installation
 
 ### Homebrew
