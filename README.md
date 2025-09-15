@@ -15,6 +15,13 @@ A powerful command-line interface for Apple's Xcode Cloud, built in Rust. Manage
 
 ## Installation
 
+### Homebrew
+
+```bash
+brew tap maximbilan/xcloud https://github.com/maximbilan/xcloud
+brew install xcloud
+```
+
 ### From Source
 
 ```bash
