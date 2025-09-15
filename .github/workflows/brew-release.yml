@@ -1,0 +1,128 @@
+name: Brew Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tap:
+        description: "Homebrew tap (e.g., owner/homebrew-tap)"
+        required: true
+        type: string
+      formula:
+        description: "Formula name"
+        required: true
+        default: "xcloud"
+        type: string
+      tag:
+        description: "Override tag to release (optional). Uses latest tag if empty."
+        required: false
+        type: string
+      dry_run:
+        description: "Don't open PR, just print computed values"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  bump-formula:
+    name: Bump Homebrew formula to latest tag
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # need tags
+
+      - name: Determine tag and artifact info
+        id: prep
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${{ inputs.tap }}" ]]; then
+            echo "Tap is required (e.g., owner/homebrew-tap)" >&2
+            exit 1
+          fi
+
+          TAG_INPUT="${{ inputs.tag }}"
+          if [[ -n "$TAG_INPUT" ]]; then
+            TAG="$TAG_INPUT"
+          else
+            # Prefer semantic version sort; fallback to creation date
+            TAG="$(git tag --sort=-version:refname | head -n1 || true)"
+            if [[ -z "$TAG" ]]; then
+              TAG="$(git tag --sort=-creatordate | head -n1 || true)"
+            fi
+          fi
+
+          if [[ -z "$TAG" ]]; then
+            echo "No tags found and no tag provided." >&2
+            exit 1
+          fi
+
+          REPO="${{ github.repository }}"
+          TARBALL_URL="https://github.com/${REPO}/archive/refs/tags/${TAG}.tar.gz"
+          echo "Latest tag: $TAG"
+          echo "Tarball URL: $TARBALL_URL"
+
+          echo "Computing SHA256 for tarball..."
+          # macOS provides shasum
+          SHA256="$(curl -LfsS "$TARBALL_URL" | shasum -a 256 | awk '{print $1}')"
+
+          if [[ -z "$SHA256" ]]; then
+            echo "Failed to compute SHA256." >&2
+            exit 1
+          fi
+
+          echo "sha256: $SHA256"
+
+          # Set outputs
+          {
+            echo "tag=$TAG"
+            echo "tarball_url=$TARBALL_URL"
+            echo "sha256=$SHA256"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Show computed values (dry run)
+        if: ${{ inputs.dry_run == true }}
+        run: |
+          echo "Tap:           ${{ inputs.tap }}"
+          echo "Formula:       ${{ inputs.formula }}"
+          echo "Tag:           ${{ steps.prep.outputs.tag }}"
+          echo "Tarball URL:   ${{ steps.prep.outputs.tarball_url }}"
+          echo "SHA256:        ${{ steps.prep.outputs.sha256 }}"
+          echo "Skipping bump-formula-pr due to dry_run=true"
+
+      - name: Bump formula in tap
+        if: ${{ inputs.dry_run != true }}
+        env:
+          HOMEBREW_GITHUB_API_TOKEN: ${{ secrets.HOMEBREW_GITHUB_API_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${HOMEBREW_GITHUB_API_TOKEN:-}" ]]; then
+            echo "HOMEBREW_GITHUB_API_TOKEN secret is not set. Add it in repo/org secrets." >&2
+            exit 1
+          fi
+
+          brew --version
+          brew update-reset
+          brew tap "${{ inputs.tap }}" || true
+
+          # Open a PR bumping the formula to the latest tag tarball
+          brew bump-formula-pr \
+            --no-browse \
+            --force \
+            --tap "${{ inputs.tap }}" \
+            --url "${{ steps.prep.outputs.tarball_url }}" \
+            --sha256 "${{ steps.prep.outputs.sha256 }}" \
+            --message "${{ inputs.formula }} ${{ steps.prep.outputs.tag }}" \
+            "${{ inputs.formula }}"
