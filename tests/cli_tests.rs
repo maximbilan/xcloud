@@ -6,5 +6,7 @@ use std::process::Command;
 fn prints_help() {
     let mut cmd = Command::cargo_bin("xcloud").unwrap();
     cmd.arg("--help");
-    cmd.assert().success().stdout(predicate::str::contains("Xcode Cloud CLI in Rust"));
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("Xcode Cloud CLI in Rust"));
 }
