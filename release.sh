@@ -51,6 +51,7 @@ EOF
 # 5. Commit the formula to a Homebrew tap
 echo "Committing formula to Homebrew tap..."
 git clone "https://github.com/${GITHUB_USER}/${HOMEBREW_TAP_REPO}.git"
+mkdir -p "${HOMEBREW_TAP_REPO}/Formula"
 mv "${PACKAGE_NAME}.rb" "${HOMEBREW_TAP_REPO}/Formula/"
 cd "${HOMEBREW_TAP_REPO}"
 git add "Formula/${PACKAGE_NAME}.rb"
