@@ -3,8 +3,8 @@
 set -e
 
 # Configuration
-GITHUB_USER="your_github_username"
-HOMEBREW_TAP_REPO="homebrew-tap"
+GITHUB_USER="maximbilan"
+HOMEBREW_TAP_REPO="xcloud"
 PACKAGE_NAME="xcloud"
 LATEST_TAG=$(git describe --tags --abbrev=0)
 if [ -z "$LATEST_TAG" ]; then
