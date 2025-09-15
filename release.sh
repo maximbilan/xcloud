@@ -6,7 +6,14 @@ set -e
 GITHUB_USER="your_github_username"
 HOMEBREW_TAP_REPO="homebrew-tap"
 PACKAGE_NAME="xcloud"
-VERSION=$(grep "^version" Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+LATEST_TAG=$(git describe --tags --abbrev=0)
+if [ -z "$LATEST_TAG" ]; then
+    echo "Error: No tags found. Please create a tag first."
+    exit 1
+fi
+
+# Strip 'v' prefix if it exists
+VERSION=${LATEST_TAG#v}
 
 # 1. Build the release binary
 echo "Building release binary..."
@@ -18,9 +25,9 @@ mkdir -p "target/release/${PACKAGE_NAME}-${VERSION}"
 cp "target/release/${PACKAGE_NAME}" "target/release/${PACKAGE_NAME}-${VERSION}/"
 tar -czf "target/release/${PACKAGE_NAME}-${VERSION}.tar.gz" -C "target/release" "${PACKAGE_NAME}-${VERSION}"
 
-# 3. Create a new GitHub release and upload the tarball
-echo "Creating GitHub release..."
-gh release create "v${VERSION}" "target/release/${PACKAGE_NAME}-${VERSION}.tar.gz" --title "v${VERSION}" --notes "Release v${VERSION}"
+# 3. Upload the tarball to the existing GitHub release
+echo "Uploading asset to GitHub release ${LATEST_TAG}..."
+gh release upload "${LATEST_TAG}" "target/release/${PACKAGE_NAME}-${VERSION}.tar.gz" --clobber
 
 # 4. Generate a Homebrew formula
 echo "Generating Homebrew formula..."
